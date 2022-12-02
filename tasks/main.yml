@@ -1,0 +1,262 @@
+#####################################################################################
+# Global
+#
+- name: Gathering facts if it was not done before
+  setup:
+  when: ansible_facts['os_family'] is not defined
+
+#####################################################################################
+# Pre-install checks
+#####################################################################################
+
+- name: Assert usage of systemd as an init system
+  assert:
+    that: ansible_service_mgr == 'systemd'
+    msg: "This role only works with systemd"
+    quiet: yes
+
+- name: Get systemd version
+  command: systemctl --version
+  changed_when: false
+  check_mode: false
+  register: __systemd_version
+  tags:
+    - skip_ansible_lint
+
+- name: Set systemd version fact
+  set_fact:
+    node_exporter_systemd_version: "{{ __systemd_version.stdout_lines[0] | regex_replace('^systemd\\s(\\d+).*$', '\\1') }}"
+
+- name: Naive assertion of proper listen address
+  assert:
+    that:
+      - "':' in node_exporter_web_listen_address"
+    quiet: yes
+
+- name: Assert collectors are not both disabled and enabled at the same time
+  assert:
+    that:
+      - "item not in node_exporter_enabled_collectors"
+    quiet: yes
+  with_items: "{{ node_exporter_disabled_collectors }}"
+
+- block:
+    - name: Assert that TLS key and cert path are set
+      assert:
+        that:
+          - "node_exporter_tls_server_config.cert_file is defined"
+          - "node_exporter_tls_server_config.key_file is defined"
+        quiet: yes
+
+    - name: Check existence of TLS cert file
+      stat:
+        path: "{{ node_exporter_tls_server_config.cert_file }}"
+      register: __node_exporter_cert_file
+
+    - name: Check existence of TLS key file
+      stat:
+        path: "{{ node_exporter_tls_server_config.key_file }}"
+      register: __node_exporter_key_file
+
+    - name: Assert that TLS key and cert are present
+      assert:
+        that:
+          - "{{ __node_exporter_cert_file.stat.exists }}"
+          - "{{ __node_exporter_key_file.stat.exists }}"
+        quiet: yes
+  when: node_exporter_tls_server_config | length > 0
+
+- name: Check if node_exporter is installed
+  stat:
+    path: "{{ node_exporter_binary_install_dir }}/node_exporter"
+  register: node_exporter_is_installed
+  check_mode: false
+
+- name: Run node_exporter to get version
+  command: "{{ node_exporter_binary_install_dir }}/node_exporter --version"
+  args:
+    warn: false
+  changed_when: false
+  register: node_exporter_current_version_output
+  check_mode: false
+  when: node_exporter_is_installed.stat.exists
+
+- name: Get node_exporter version from stdout
+  set_fact:
+    node_exporter_installed_version: "{{ node_exporter_current_version_output.stdout_lines[0].split(' ')[2] }}"
+  when: >
+    node_exporter_is_installed.stat.exists and
+    node_exporter_current_version_output.stdout | length >0
+
+- name: Get node_exporter version from stderr
+  set_fact:
+    node_exporter_installed_version: "{{ node_exporter_current_version_output.stderr_lines[0].split(' ')[2] }}"
+  when: >
+    node_exporter_is_installed.stat.exists and
+    node_exporter_current_version_output.stderr | length >0
+
+- name: Print node_exporter version
+  debug:
+    msg: "Installed version: {{node_exporter_installed_version}}"
+  when: node_exporter_is_installed.stat.exists
+
+#####################################################################################
+# Prepare user and group
+#####################################################################################
+
+- name: Create the node_exporter group
+  group:
+    name: "{{ node_exporter_system_group }}"
+    state: present
+    system: true
+  become: yes
+  when: node_exporter_system_group != "root"
+
+- name: Create the node_exporter user
+  user:
+    name: "{{ node_exporter_system_user }}"
+    groups: "{{ node_exporter_system_group }}"
+    append: true
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+    home: /
+  become: yes
+  when: node_exporter_system_user != "root"
+
+#####################################################################################
+# Download and extract binary file
+#####################################################################################
+
+- block:
+    - name: Download node_exporter binary to local folder
+      become: false
+      get_url:
+        url: "https://github.com/prometheus/node_exporter/releases/download/v{{node_exporter_version}}/node_exporter-{{node_exporter_version}}.linux-amd64.tar.gz"
+        dest: "/tmp/node_exporter-{{node_exporter_version}}.linux-amd64.tar.gz"
+#        checksum: "sha256:{{ node_exporter_checksum }}"
+        mode: '0644'
+      register: download_binary
+      until: download_binary is succeeded
+      retries: 5
+      delay: 2
+      check_mode: false
+
+    - name: Unpack node_exporter binary
+      become: false
+      unarchive:
+        src: "/tmp/node_exporter-{{node_exporter_version}}.linux-amd64.tar.gz"
+        dest: "/tmp"
+        creates: "/tmp/node_exporter-{{node_exporter_version}}.linux-amd64/node_exporter"
+        remote_src: yes
+      check_mode: false
+
+    - name: Propagate node_exporter binaries
+      copy:
+        src: "/tmp/node_exporter-{{node_exporter_version}}.linux-amd64/node_exporter"
+        dest: "{{ node_exporter_binary_install_dir }}/node_exporter"
+        mode: 0755
+        owner: root
+        group: root
+        remote_src: yes
+      become: yes
+      register: node_exporter_restart2
+      check_mode: false
+
+    - name: Remove node exporter temporary folder and archive 
+      ansible.builtin.file:
+        path: "{{item}}"
+        state: absent
+      become: yes
+      loop:
+        - '/tmp/node_exporter-{{node_exporter_version}}.linux-amd64'
+        - '/tmp/node_exporter-{{node_exporter_version}}.linux-amd64.tar.gz'
+
+  when: >
+    not node_exporter_is_installed.stat.exists or 
+    node_exporter_installed_version != node_exporter_version
+
+#####################################################################################
+# Configure and install service
+#####################################################################################
+
+- name: Copy the node_exporter systemd service file
+  template:
+    src: node_exporter.service.j2
+    dest: /etc/systemd/system/node_exporter.service
+    owner: root
+    group: root
+    mode: 0644
+  become: yes
+  register: node_exporter_service
+
+- block:
+    - name: Create node_exporter config directory
+      file:
+        path: "/etc/node_exporter"
+        state: directory
+        owner: root
+        group: root
+        mode: u+rwX,g+rwX,o=rX
+      become: yes
+
+    - name: Copy the node_exporter config file
+      template:
+        src: config.yaml.j2
+        dest: /etc/node_exporter/config.yaml
+        owner: root
+        group: root
+        mode: 0644
+      become: yes
+      register: node_exporter_restart1
+
+  when:
+    ( node_exporter_tls_server_config | length > 0 ) or
+    ( node_exporter_http_server_config | length > 0 ) or
+    ( node_exporter_basic_auth_users | length > 0 )
+
+- name: Create textfile collector dir
+  file:
+    path: "{{ node_exporter_textfile_dir }}"
+    state: directory
+    owner: "{{ node_exporter_system_user }}"
+    group: "{{ node_exporter_system_group }}"
+    recurse: true
+    mode: u+rwX,g+rwX,o=rX
+  become: yes
+  when: node_exporter_textfile_dir | length > 0
+
+- name: systemctl daemon-reload after .service file changed
+  command: systemctl daemon-reload
+  become: yes
+  when: node_exporter_service.changed
+  check_mode: no
+
+- name: Enable service node_exporter and start it
+  service: 
+    name: node_exporter
+    state: started
+    enabled: yes
+  become: yes
+  check_mode: no
+
+- name: restart node_exporter
+  become: true
+  service: 
+    name: node_exporter
+    state: restarted
+  when: >-
+    node_exporter_service.changed or
+    node_exporter_restart1.changed or
+    node_exporter_restart2.changed
+
+- name: Set node_exporter_post_hook to make post-actions
+  set_fact:
+    node_exporter_post_hook: true
+  when: >-
+    node_exporter_service.changed or
+    node_exporter_restart1.changed or
+    node_exporter_restart2.changed
+
+- debug:
+    var: node_exporter_post_hook
