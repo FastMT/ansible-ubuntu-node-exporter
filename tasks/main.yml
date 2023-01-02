@@ -16,7 +16,7 @@
     quiet: yes
 
 - name: Get systemd version
-  command: systemctl --version
+  ansible.builtin.command: systemctl --version
   changed_when: false
   check_mode: false
   register: __systemd_version
@@ -73,9 +73,9 @@
   check_mode: false
 
 - name: Run node_exporter to get version
-  command: "{{ node_exporter_binary_install_dir }}/node_exporter --version"
-  args:
-    warn: false
+  ansible.builtin.command: "{{ node_exporter_binary_install_dir }}/node_exporter --version"
+#  args:
+#    warn: false
   changed_when: false
   register: node_exporter_current_version_output
   check_mode: false
@@ -227,7 +227,7 @@
   when: node_exporter_textfile_dir | length > 0
 
 - name: systemctl daemon-reload after .service file changed
-  command: systemctl daemon-reload
+  ansible.builtin.command: systemctl daemon-reload
   become: yes
   when: node_exporter_service.changed
   check_mode: no
