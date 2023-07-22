@@ -11,7 +11,7 @@ Create requirements.yml file
 # Include ubuntu-node-exporter role
 - src: https://github.com/FastMT/ansible-ubuntu-node-exporter.git
   name: ubuntu-node-exporter
-  version: "v1.0.1"
+  version: "v1.0.2"
 ```
 
 Install external module into ~/.ansible/roles folder
