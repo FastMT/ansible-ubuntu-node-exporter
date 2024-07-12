@@ -33,6 +33,23 @@
       - "':' in node_exporter_web_listen_address"
     quiet: yes
 
+- name: Extract IP address from node_exporter_web_listen_address
+  set_fact:
+    node_exporter_web_listen_address_ip: "{{ node_exporter_web_listen_address.split(':')[0] }}"
+
+- name: Extract port from node_exporter_web_listen_address
+  set_fact:
+    node_exporter_web_listen_address_port: "{{ node_exporter_web_listen_address.split(':')[1] }}"
+
+- name: Rebind node_exporter_web_listen_address to 0.0.0.0 if there are no such addressess on host
+  set_fact:
+    node_exporter_web_listen_address: "0.0.0.0:{{ node_exporter_web_listen_address_port }}"
+  when: node_exporter_web_listen_address_ip not in ansible_all_ipv4_addresses
+
+- name: Print node_exporter_web_listen_address
+  debug:
+    msg: "Node exporter will listen on {{ node_exporter_web_listen_address }}"
+
 - name: Assert collectors are not both disabled and enabled at the same time
   assert:
     that:
@@ -250,6 +267,10 @@
     node_exporter_restart1.changed or
     node_exporter_restart2.changed
 
+#####################################################################################
+# Post-install actions
+#####################################################################################
+
 - name: Set node_exporter_post_hook to make post-actions
   set_fact:
     node_exporter_post_hook: true
@@ -260,3 +281,8 @@
 
 - debug:
     var: node_exporter_post_hook
+
+- name: Restore node_exporter_web_listen_address
+  set_fact:
+    node_exporter_web_listen_address: "{{ node_exporter_web_listen_address_ip }}:{{ node_exporter_web_listen_address_port }}"
+  when: node_exporter_web_listen_address_ip not in ansible_all_ipv4_addresses
